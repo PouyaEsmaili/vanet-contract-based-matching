@@ -66,10 +66,15 @@ public:
         LAST_BASE_MAC_CONTROL_KIND,
     };
 
-protected:
     /** @brief Handler to the physical layer.*/
     MacToPhyInterface* phy;
 
+    /**
+    * @brief MAC address.
+    **/
+    LAddress::L2Type myMacAddr;
+
+protected:
     /** @brief Pointer to the arp module*/
     // BaseArp* arp;
 
@@ -77,11 +82,6 @@ protected:
      * @brief Length of the MacPkt header
      **/
     int headerLength;
-
-    /**
-     * @brief MAC address.
-     **/
-    LAddress::L2Type myMacAddr;
 
 public:
     // Module_Class_Members( BaseMacLayer, BaseLayer, 0 );
