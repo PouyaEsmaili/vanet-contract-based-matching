@@ -34,8 +34,9 @@ protected:
 
         mobility = veins::TraCIMobilityAccess().get(getParentModule());
 
-        if (stage == 0)
-            cout << "Car initialized with id " << getParentModule()->getIndex() << " at " << simTime() << endl;
+        if (stage > 0)
+            cout << "Car initialized with id " << getParentModule()->getIndex() << " and address " << myAddress() <<
+                 " at " << simTime() << endl;
     }
 
     virtual void finish() override {
@@ -63,6 +64,19 @@ protected:
         baseMessage->setChannelNumber(178);
         baseMessage->setPsid(-1);
         baseMessage->setUserPriority(7);
+        return baseMessage;
+    }
+
+    cMessage *populateGeo(cMessage *msg) {
+        BaseMessageWithGeo *baseMessage = check_and_cast<BaseMessageWithGeo *>(msg);
+        veins::Coord position = mobility->getPositionAt(simTime());
+
+        baseMessage->setPosition(veinsCoordToCoord(position));
+
+        double s = mobility->getSpeed();
+        veins::Heading h = mobility->getHeading();
+        baseMessage->setSpeed(veinsCoordToCoord(h.toCoord(s)));
+
         return baseMessage;
     }
 
@@ -129,16 +143,19 @@ protected:
         }
         ContractChoice *contractChoice = new ContractChoice("chooseContract");
         contractChoice->setType(bestContractIndex);
+        contractChoice->setIndex(getIndex());
+
         // print contract choice index, resource, and reward, also with index of vehicle
         EV << "Contract choice: " << contractChoice->getType() << " from vehicle: " << myAddress()
            << " with resource: "
            << selectedContract.getResource() << " and reward: " << selectedContract.getReward() << endl;
 
+        populateGeo(contractChoice);
         populate(contractChoice, baseStationAddress);
-        sendDown(contractChoice);
+        sendDelayedDown(contractChoice, uniform(0, 0.1));
 
         cMessage *prepTaskMetadataMsg = new cMessage("prepareTaskMetadata");
-        scheduleAt(simTime() + uniform(0, 0.1), prepTaskMetadataMsg);
+        scheduleAt(simTime() + uniform(0.1, 0.3), prepTaskMetadataMsg);
     }
 
     void prepareTaskMetadata() {
@@ -147,16 +164,12 @@ protected:
 
         cout << "Vehicle: " << getIndex() << " with resource: " << totalResource << " preparing task metadata" << endl;
 
-        veins::Coord position = mobility->getPositionAt(simTime());
-        veins::Coord speed = mobility->getHostSpeed();
-
         TaskMetadata *taskMetadata = new TaskMetadata("handleTaskMetadata");
         taskMetadata->setTaskResource(taskResource);
         taskMetadata->setTaskDataSize(taskDataSize);
         taskMetadata->setDelayConstraint(delayConstraint);
-        taskMetadata->setPosition(veinsCoordToCoord(position));
-        taskMetadata->setSpeed(veinsCoordToCoord(speed));
 
+        populateGeo(taskMetadata);
         populate(taskMetadata, baseStationAddress);
         sendDown(taskMetadata);
     }
@@ -164,17 +177,14 @@ protected:
     void handleTaskAssignment(cMessage *msg) {
         TaskAssignment *task = check_and_cast<TaskAssignment *>(msg);
         cout << "Vehicle: " << getIndex() << " will assign it's task to " << task->getFogNodeId() <<
-             " with price " << task->getPrice() << " with resource " << taskResource << " data size " << taskDataSize
-             << endl;
+             " with price " << task->getPrice() << " with resource " << taskResource << " data size " << taskDataSize <<
+             " at " << simTime() << endl;
 
         offloadTask(task->getAddress());
     }
 
     void offloadTask(int address) {
         string *taskData = new string(taskDataSize, 'a');
-        cout << "Vehicle: " << getIndex() << " offloading task to " << address <<
-             " and data size " << taskDataSize << " at " << simTime() << endl;
-
         taskAssignmentTime = simTime();
 
         Task *task = new Task("handleTask");
@@ -187,22 +197,20 @@ protected:
 
     void handleTask(cMessage *msg) {
         Task *task = check_and_cast<Task *>(msg);
-        cout << "Vehicle: " << getIndex() << " received task with resource " << task->getTaskResource() <<
-             " at " << simTime() << endl;
 
         // sleep for sharedResource / taskResource
         simtime_t sleepTime = task->getTaskResource() / selectedContract.getResource();
-        cout << "Vehicle: " << getIndex() << " sleeping for " << sleepTime << " at " << simTime() << endl;
 
-        scheduleAt(simTime() + sleepTime, task);
+        cout << "Vehicle: " << getIndex() << " received task with resource " << task->getTaskResource() <<
+             " at " << simTime() << " and sleeping for " << sleepTime << endl;
+
+        scheduleAt(simTime() + sleepTime, task->dup());
     }
 
     void finishTask(cMessage *msg) {
         Task *task = check_and_cast<Task *>(msg);
         cout << "Vehicle: " << getIndex() << " finished task with resource " << task->getTaskResource() <<
              " at " << simTime() << endl;
-
-        delete task;
 
         // send task completion to base station
         TaskCompletion *taskCompletion = new TaskCompletion("handleTaskCompletion");
@@ -218,7 +226,8 @@ protected:
              << " at " << simTime() << endl;
 
         SimTime delay = simTime() - taskAssignmentTime;
-        cout << "Vehicle: " << getIndex() << " task delay: " << delay << " at " << simTime() << endl;
+        cout << "Vehicle: " << getIndex() << " task delay: " << delay << endl;
+        cerr << delay << endl;
     }
 };
 

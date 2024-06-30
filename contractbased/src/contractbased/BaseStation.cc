@@ -61,6 +61,8 @@ private:
 
     ContractList *contractList;
 
+    int baseStationTasks;
+
 protected:
     virtual void initialize(int stage) override {
         BaseApplLayer::initialize(stage);
@@ -71,11 +73,7 @@ protected:
         totalVehicles = par("totalVehicles");
         deltaMin = par("deltaMin");
         deltaMax = par("deltaMax");
-
-        cStringTokenizer tokenizer(par("typeProbability"), ",");
-        while (tokenizer.hasMoreTokens()) {
-            typeProbability.push_back(std::stod(tokenizer.nextToken()));
-        }
+        baseStationTasks = 0;
 
         taskAssignmentThreshold = par("taskAssignmentThreshold");
 
@@ -85,21 +83,27 @@ protected:
         lastVehicleId = 0;
 
         if (stage == 0) {
+            cStringTokenizer tokenizer(par("typeProbability"), ",");
+            while (tokenizer.hasMoreTokens()) {
+                typeProbability.push_back(std::stod(tokenizer.nextToken()));
+            }
+
             cMessage *prepContractsMsg = new cMessage("prepareContracts");
-            scheduleAt(3, prepContractsMsg);
+            scheduleAt(4, prepContractsMsg);
         }
     }
 
     int getVehicleId(int addr) {
         if (vehicleIdMap.find(addr) != vehicleIdMap.end()) {
             return vehicleIdMap[addr];
+        } else {
+            cout << "Error in vehicle id map for addr " << addr << endl;
+            return -1;
         }
-        vehicleIdMap[addr] = lastVehicleId;
-        return lastVehicleId++;
     }
 
     int myAddress() {
-        auto* mac = static_cast<BaseMacLayer *>(getParentModule()->getSubmodule("nic")->getSubmodule("mac1609_4"));
+        auto *mac = static_cast<BaseMacLayer *>(getParentModule()->getSubmodule("nic")->getSubmodule("mac1609_4"));
         if (!mac) {
             throw cRuntimeError("MAC module not found");
         }
@@ -124,9 +128,12 @@ protected:
 
     virtual void handleSelfMsg(cMessage *msg) override {
         // Check if this is the 'prepareContracts' self-message
-        if (strcmp(msg->getName(), "prepareContracts") == 0) {
-            // Call the function to prepare contracts
-            prepareContracts();
+        if (msg->isName("prepareContracts")) {
+            prepareContracts(msg);
+        } else if (msg->isName("handleTask")) {
+            finishTask(msg);
+        } else {
+            cout << "BS received unknown self message" << endl;
         }
 
         delete msg;
@@ -138,17 +145,19 @@ protected:
                 handleTaskMetadata(msg);
             } else if (msg->isName("chooseContract")) {
                 chooseContract(msg);
-            } else if(msg->isName("handleTaskCompletion")) {
+            } else if (msg->isName("handleTask")) {
+                handleTask(msg);
+            } else if (msg->isName("handleTaskCompletion")) {
                 handleTaskCompletion(msg);
             } else {
-                cout << "Received unknown message" << endl;
+                cout << "BS received unknown message" << endl;
             }
         }
 
         delete msg;
     }
 
-    void prepareContracts() {
+    void prepareContracts(cMessage *msg) {
         CURL *curl;
         CURLcode res;
         std::string readBuffer;
@@ -210,23 +219,37 @@ protected:
 
     void chooseContract(cMessage *msg) {
         ContractChoice *choice = check_and_cast<ContractChoice *>(msg);
+        vehicleIdMap[choice->getSender()] = choice->getIndex();
+
         int type = choice->getType();
         int vehicleId = getVehicleId(choice->getSender());
+
+        vehicles[vehicleId].position = choice->getPosition();
+        vehicles[vehicleId].speed = choice->getSpeed();
+
+        vehicles[vehicleId].address = choice->getSender();
         if (type < 0) {
-            vehicles[vehicleId].address = choice->getSender();
             vehicles[vehicleId].sharedResource = 0;
             vehicles[vehicleId].price = 0;
+            cout << "Vehicle: " << vehicleId << " has no contract" << endl;
             return;
         }
-        vehicles[vehicleId].address = choice->getSender();
         vehicles[vehicleId].sharedResource = contractList->getContracts(type).getResource();
         vehicles[vehicleId].price = contractList->getContracts(type).getReward();
+
+        cout << "Vehicle: " << vehicleId << " shared resource: " << vehicles[vehicleId].sharedResource << " price: "
+             << vehicles[vehicleId].price << endl;
     }
 
     void handleTaskMetadata(cMessage *msg) {
         TaskMetadata *taskMetadata = check_and_cast<TaskMetadata *>(msg);
 
         int vehicleId = getVehicleId(taskMetadata->getSender());
+        if (vehicleId == -1) {
+            cout << "Vehicle id not found" << endl;
+            return;
+        }
+
         cout << "Received task metadata from vehicle: " << vehicleId << endl;
         vehicles[vehicleId].position = taskMetadata->getPosition();
         vehicles[vehicleId].speed = taskMetadata->getSpeed();
@@ -298,10 +321,21 @@ protected:
                     }
                     vehicles[i].totalTime[j] = vehicles[i].taskResource / vehicles[j].sharedResource;
                     double transmissionTime = getTransmissionTime(i, j);
-                    if (transmissionTime > getTransmissionConstraint(i, j)) {
+                    double transmissionConstraint = getTransmissionConstraint(i, j);
+                    if (transmissionConstraint > 0) {
+//                        cout << "transmission time from " << i << " to " << j << ": " << transmissionTime << endl;
+//                        cout << "transmission constraint from " << i << " to " << j << ": " << transmissionConstraint
+//                             << endl;
+                    }
+                    if (transmissionTime > transmissionConstraint) {
                         continue;
                     }
                     vehicles[i].totalTime[j] += transmissionTime;
+//                    cout << "Total time: " << vehicles[i].totalTime[j] << endl;
+                    if (vehicles[i].totalTime[j] / 10 > vehicles[i].delayConstraint) {
+//                        cout << vehicles[i].totalTime[j] / 10 << " is greater than " << vehicles[i].delayConstraint << endl;
+                        continue;
+                    }
                     double preference = 1 / vehicles[i].totalTime[j] - vehicles[j].taskPrice;
                     if (preference > maxPreference || maxPreferenceId == i) {
                         maxPreference = preference;
@@ -314,7 +348,13 @@ protected:
             }
             for (int i = 0; i < numVehicles; i++) {
                 if (assignedIds[i].size() > 1) {
+                    int skipIndex = -1;
+                    if (iterations >= 1000 && iterations % 1000 == 0) {
+                        skipIndex = rand() % assignedIds[i].size();
+                    }
                     for (int j = 0; j < assignedIds[i].size(); j++) {
+                        if (j == skipIndex)
+                            continue;
                         int id = assignedIds[i][j];
                         proposals[id] = -1;
                         remainingTasks++;
@@ -327,6 +367,7 @@ protected:
             }
             if (iterations > 10000) {
                 cout << "Task assignment failed" << endl;
+                iterations = 0;
                 return;
             }
             iterations++;
@@ -342,9 +383,18 @@ protected:
             vehicles[nodeId].taskAssignedFrom = i;
 
             TaskAssignment *taskAssignment = new TaskAssignment("handleTaskAssignment");
-            taskAssignment->setFogNodeId(nodeId);
-            taskAssignment->setPrice(vehicles[nodeId].price);
-            taskAssignment->setAddress(vehicles[nodeId].address);
+
+            if (nodeId == i) {
+                taskAssignment->setFogNodeId(-1);
+                taskAssignment->setPrice(0);
+                taskAssignment->setAddress(myAddress());
+
+                baseStationTasks++;
+            } else {
+                taskAssignment->setFogNodeId(nodeId);
+                taskAssignment->setPrice(vehicles[nodeId].price);
+                taskAssignment->setAddress(vehicles[nodeId].address);
+            }
 
             populate(taskAssignment, vehicles[i].address);
             sendDown(taskAssignment);
@@ -362,7 +412,8 @@ protected:
     }
 
     double getTransmissionTime(int sourceId, int destinationId) {
-        return vehicles[sourceId].taskDataSize / (0.002 * log(1 + getDistance(sourceId, destinationId) * 0.1));
+        return vehicles[sourceId].taskDataSize /
+               (3000000 * log(1 + pow(getDistance(sourceId, destinationId), -2) * 0.1));
     }
 
     double getTransmissionConstraint(int sourceId, int destinationId) {
@@ -374,20 +425,22 @@ protected:
 
         double distanceX = dp.getX() - sp.getX();
         double distanceY = dp.getY() - sp.getY();
-//        double distanceZ = dp.getZ() - sp.getZ();
-        double distanceZ = 0;
+        double distanceZ = dp.getZ() - sp.getZ();
+//        double distanceZ = 0;
         double distance = sqrt(distanceX * distanceX + distanceY * distanceY + distanceZ * distanceZ);
 
         double relativeSpeedX = ds.getX() - ss.getX();
         double relativeSpeedY = ds.getY() - ss.getY();
-//        double relativeSpeedZ = ds.getZ() - ss.getZ();
-        double relativeSpeedZ = 0;
+        double relativeSpeedZ = ds.getZ() - ss.getZ();
+//        double relativeSpeedZ = 0;
 
-        double rangeRadius = 200;
+        double rangeRadius = 400;
 
         if (rangeRadius - distance <= 0) {
             return 0;
         }
+//        cout << "distance from " << sourceId << " to " << destinationId << " is " << distance << endl;
+
 
         double a = relativeSpeedX * relativeSpeedX + relativeSpeedY * relativeSpeedY + relativeSpeedZ * relativeSpeedZ;
         double b = 2 * (distanceX * relativeSpeedX + distanceY * relativeSpeedY + distanceZ * relativeSpeedZ);
@@ -397,10 +450,10 @@ protected:
         if (discriminant < 0) {
             cout << "Discriminant is negative from " << sourceId << " to " << destinationId << endl;
             return 1000000;
+        } else if (a == 0) {
+            return 1000000;
         } else {
-            double t1 = (-b + sqrt(discriminant)) / (2 * a);
-            double t2 = (-b - sqrt(discriminant)) / (2 * a);
-            return t1 < t2 ? t1 : t2;
+            return (-b + sqrt(discriminant)) / (2 * a);
         }
     }
 
@@ -409,12 +462,37 @@ protected:
     }
 
     void handleTaskCompletion(cMessage *msg) {
-        TaskCompletion *taskCompletion = check_and_cast<TaskCompletion *>(msg);
+        TaskCompletion *taskCompletion = (check_and_cast<TaskCompletion *>(msg))->dup();
         int vehicleId = getVehicleId(taskCompletion->getSender());
 
         int assignedFrom = vehicles[vehicleId].taskAssignedFrom;
 
         populate(taskCompletion, vehicles[assignedFrom].address);
+        sendDown(taskCompletion);
+    }
+
+    void handleTask(cMessage *msg) {
+        Task *task = check_and_cast<Task *>(msg);
+
+        // sleep for sharedResource / taskResource
+        simtime_t sleepTime = task->getTaskResource() / (computationCapability / baseStationTasks);
+
+        cout << "BaseStation received task with resource " << task->getTaskResource() <<
+             " at " << simTime() << " and sleeping for " << sleepTime << endl;
+
+        scheduleAt(simTime() + sleepTime, task->dup());
+    }
+
+    void finishTask(cMessage *msg) {
+        Task *task = check_and_cast<Task *>(msg);
+        cout << "BaseStation finished task with resource " << task->getTaskResource() <<
+             " at " << simTime() << endl;
+
+        // send task completion to base station
+        TaskCompletion *taskCompletion = new TaskCompletion("handleTaskCompletion");
+        taskCompletion->setResult("Task completed");
+
+        populate(taskCompletion, task->getSender());
         sendDown(taskCompletion);
     }
 };

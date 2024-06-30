@@ -12,6 +12,11 @@ message BaseMessage extends veins::BaseFrame1609_4 {
     int recipient = -1;
 }
 
+message BaseMessageWithGeo extends BaseMessage {
+    Coord position;
+    Coord speed;
+}
+
 message Contract {
     double resource; // Required Computation Resource (delta)
     double reward; // Corresponding Reward (pi)
@@ -21,17 +26,15 @@ message ContractList extends BaseMessage {
     Contract contracts[];
 }
 
-message ContractChoice extends BaseMessage {
+message ContractChoice extends BaseMessageWithGeo {
     int type;
+    int index;
 }
 
-message TaskMetadata extends BaseMessage {
+message TaskMetadata extends BaseMessageWithGeo {
     double taskResource;
     double taskDataSize;
     double delayConstraint;
-
-    Coord position;
-    Coord speed;
 }
 
 message TaskAssignment extends BaseMessage {
